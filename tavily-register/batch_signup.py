@@ -32,7 +32,7 @@ VERIFY_TIMEOUT = 180
 VERIFY_POLL_INTERVAL = 5.0
 MAX_EMAIL_GENERATE_ATTEMPTS = 30
 MAX_DOMAIN_BLOCKED_RETRIES = 10
-MAX_REGISTRATIONS_PER_WINDOW = 6
+MAX_REGISTRATIONS_PER_WINDOW = 5
 REGISTRATION_WINDOW_SECONDS = 90 * 60
 
 
@@ -399,29 +399,33 @@ def batch_signup(
 
     total = len(email_list) if emails is not None else count
 
-    def maybe_wait_for_rate_limit(next_index: int):
+    def sleep_for_rate_limit(reason: str):
+        if registration_window_seconds <= 0:
+            return
+        wait_minutes = registration_window_seconds / 60
+        wake_at = datetime.now().timestamp() + registration_window_seconds
+        wake_at_str = datetime.fromtimestamp(wake_at).strftime("%Y-%m-%d %H:%M:%S")
+        print()
+        print("=" * 60)
+        print(reason)
+        print(f"等待 {wait_minutes:.1f} 分钟后继续...")
+        print(f"预计恢复时间: {wake_at_str}")
+        print("=" * 60)
+        append_run_log(run_log_file, f"{reason}，暂停 {registration_window_seconds} 秒，预计 {wake_at_str} 恢复")
+        time.sleep(registration_window_seconds)
+        append_run_log(run_log_file, "限速等待结束，继续注册")
+
+    def maybe_wait_for_rate_limit():
         nonlocal window_completed
-        if max_registrations_per_window <= 0 or registration_window_seconds <= 0:
+        if max_registrations_per_window <= 0:
             return
-        if next_index <= 0:
-            return
-        if window_completed > 0 and window_completed % max_registrations_per_window == 0:
-            wait_minutes = registration_window_seconds / 60
-            wake_at = datetime.now().timestamp() + registration_window_seconds
-            wake_at_str = datetime.fromtimestamp(wake_at).strftime("%Y-%m-%d %H:%M:%S")
-            print()
-            print("=" * 60)
-            print(f"达到 Tavily 单 IP 限制：已完成 {window_completed} 个注册")
-            print(f"等待 {wait_minutes:.1f} 分钟后继续...")
-            print(f"预计恢复时间: {wake_at_str}")
-            print("=" * 60)
-            append_run_log(run_log_file, f"达到限速阈值，已完成 {window_completed} 个注册，暂停 {registration_window_seconds} 秒，预计 {wake_at_str} 恢复")
-            time.sleep(registration_window_seconds)
-            append_run_log(run_log_file, "限速等待结束，继续注册")
+        if window_completed > 0 and window_completed >= max_registrations_per_window:
+            sleep_for_rate_limit(f"达到 Tavily 单 IP 限制：当前窗口已完成 {window_completed} 个注册")
+            window_completed = 0
 
     with GPTMailClient(gptmail_base_url, gptmail_api_key, timeout=gptmail_timeout) as mail_client:
         for i in range(total):
-            maybe_wait_for_rate_limit(i)
+            maybe_wait_for_rate_limit()
             domain_blocked_retries = 0
             completed_this_item = False
             while True:
@@ -514,11 +518,18 @@ def batch_signup(
                         error = result.get("error", "unknown")
                         print(f"\n注册失败: {error}")
 
-                        # IP 被禁止：立即终止批量注册
+                        # IP 被禁止：等待一个窗口后继续，而不是直接退出
                         if isinstance(error, str) and "ip-signup-blocked" in error:
                             save_failed(failed_file, email, error)
-                            print("\n检测到 ip-signup-blocked：当前 IP 已被禁止，终止批量注册。")
-                            return
+                            append_run_log(run_log_file, f"触发 IP 封禁 {email} - {error}")
+                            print("\n检测到 ip-signup-blocked：当前 IP 已被禁止，等待 90 分钟后继续。")
+                            sleep_for_rate_limit("检测到 ip-signup-blocked")
+                            window_completed = 0
+                            if emails is None:
+                                print("    重新获取邮箱后继续...")
+                                continue
+                            failed_count += 1
+                            break
 
                         # 域名被禁用：加入禁用列表并重新获取邮箱注册（仅自动生成模式）
                         if (
@@ -579,6 +590,7 @@ def batch_signup(
 
             if completed_this_item:
                 window_completed += 1
+                append_run_log(run_log_file, f"当前窗口累计成功注册 {window_completed}/{max_registrations_per_window}")
 
             # 注册间隔
             if i < total - 1:
