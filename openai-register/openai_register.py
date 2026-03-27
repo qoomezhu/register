@@ -35,6 +35,12 @@ CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback"
 DEFAULT_SCOPE = "openid email profile offline_access"
 
+SUB2API_BASE_URL = str(os.getenv("SUB2API_BASE_URL") or "").strip().rstrip("/")
+SUB2API_ADMIN_API_KEY = str(os.getenv("SUB2API_ADMIN_API_KEY") or "").strip()
+SUB2API_BEARER = str(os.getenv("SUB2API_BEARER") or "").strip()
+SUB2API_EMAIL = str(os.getenv("SUB2API_EMAIL") or "").strip()
+SUB2API_PASSWORD = str(os.getenv("SUB2API_PASSWORD") or "").strip()
+
 # ========== 临时邮箱提供商：GPTMail + TempMail.lol ==========
 
 class GPTMailClient:
@@ -300,11 +306,53 @@ def _post_form(url: str, data: Dict[str, str], timeout: int = 30) -> Dict[str, A
         raw = exc.read()
         raise RuntimeError(f"Token 交换失败: {exc.code}: {raw.decode('utf-8', 'replace')}") from exc
 
+
+
 def _to_int(v: Any) -> int:
     try:
         return int(v)
     except (TypeError, ValueError):
         return 0
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _parse_int_csv(raw: str, default: List[int] | None = None) -> List[int]:
+    values = []
+    for part in str(raw or "").split(","):
+        part = part.strip()
+        if part and part.lstrip("-").isdigit():
+            values.append(int(part))
+    return values or list(default or [])
+
+
+def _resolve_sub2api_settings(args=None) -> Dict[str, Any]:
+    base_url = str((getattr(args, "sub2api_base_url", None) if args else None) or SUB2API_BASE_URL or "").strip().rstrip("/")
+    admin_api_key = str((getattr(args, "sub2api_admin_api_key", None) if args else None) or SUB2API_ADMIN_API_KEY or "").strip()
+    bearer = str((getattr(args, "sub2api_bearer", None) if args else None) or SUB2API_BEARER or "").strip()
+    email = str((getattr(args, "sub2api_email", None) if args else None) or SUB2API_EMAIL or "").strip()
+    password = str((getattr(args, "sub2api_password", None) if args else None) or SUB2API_PASSWORD or "").strip()
+    group_ids_raw = (getattr(args, "sub2api_group_ids", None) if args else None) or os.getenv("SUB2API_GROUP_IDS") or "2"
+    auto_upload = bool(getattr(args, "sub2api_upload", False)) or _as_bool(os.getenv("AUTO_UPLOAD_SUB2API"))
+    return {
+        "base_url": base_url,
+        "admin_api_key": admin_api_key,
+        "bearer": bearer,
+        "email": email,
+        "password": password,
+        "group_ids": _parse_int_csv(group_ids_raw, [2]),
+        "auto_upload": auto_upload,
+    }
+
+
+def _decode_jwt_payload(token: str) -> Dict[str, Any]:
+    return _jwt_claims_no_verify(token)
 
 def _build_sentinel_payload(session, did: str, flow: str) -> str:
     req_body = json.dumps({"p": "", "id": did, "flow": flow})
@@ -403,6 +451,133 @@ def submit_callback_url(callback_url: str, expected_state: str, code_verifier: s
         "expired": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + max(expires_in, 0))),
     }
     return json.dumps(config, ensure_ascii=False, indent=2)
+
+
+def _sub2api_login(settings: Dict[str, Any]) -> str:
+    """登录 Sub2API 管理后台，返回 Bearer token。"""
+    base_url = str(settings.get("base_url") or "").rstrip("/")
+    email = str(settings.get("email") or "").strip()
+    password = str(settings.get("password") or "").strip()
+    if not base_url or not email or not password:
+        return ""
+
+    url = f"{base_url}/api/v1/auth/login"
+    try:
+        resp = requests.post(
+            url,
+            json={"email": email, "password": password},
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=15,
+        )
+        data = resp.json() if hasattr(resp, "json") else {}
+        token = (
+            data.get("token")
+            or data.get("access_token")
+            or (data.get("data") or {}).get("token")
+            or (data.get("data") or {}).get("access_token")
+            or ""
+        )
+        return str(token).strip()
+    except Exception as e:
+        print(f"[Sub2Api] 登录失败: {e}")
+        return ""
+
+
+def _build_sub2api_account_payload(email: str, tokens: dict, group_ids: List[int]) -> dict:
+    access_token = str(tokens.get("access_token") or "").strip()
+    refresh_token = str(tokens.get("refresh_token") or "").strip()
+    id_token = str(tokens.get("id_token") or "").strip()
+
+    at_payload = _decode_jwt_payload(access_token) if access_token else {}
+    at_auth = at_payload.get("https://api.openai.com/auth") or {}
+    chatgpt_account_id = str(at_auth.get("chatgpt_account_id") or tokens.get("account_id") or "").strip()
+    chatgpt_user_id = str(at_auth.get("chatgpt_user_id") or "").strip()
+    exp_timestamp = at_payload.get("exp", 0)
+    expires_at = exp_timestamp if isinstance(exp_timestamp, int) and exp_timestamp > 0 else int(time.time()) + 863999
+
+    it_payload = _decode_jwt_payload(id_token) if id_token else {}
+    it_auth = it_payload.get("https://api.openai.com/auth") or {}
+    organization_id = str(it_auth.get("organization_id") or "").strip()
+    if not organization_id:
+        orgs = it_auth.get("organizations") or []
+        if orgs:
+            organization_id = str((orgs[0] or {}).get("id") or "").strip()
+
+    return {
+        "name": email,
+        "notes": "",
+        "platform": "openai",
+        "type": "oauth",
+        "credentials": {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "expires_in": 863999,
+            "expires_at": expires_at,
+            "chatgpt_account_id": chatgpt_account_id,
+            "chatgpt_user_id": chatgpt_user_id,
+            "organization_id": organization_id,
+            "client_id": CLIENT_ID,
+            "id_token": id_token,
+        },
+        "extra": {"email": email},
+        "group_ids": group_ids,
+        "concurrency": 10,
+        "priority": 1,
+        "auto_pause_on_expired": True,
+    }
+
+
+def _sub2api_auth_headers(settings: Dict[str, Any]) -> Dict[str, str]:
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": f"{settings['base_url']}/admin/accounts",
+    }
+    admin_api_key = str(settings.get("admin_api_key") or "").strip()
+    bearer = str(settings.get("bearer") or "").strip()
+    if admin_api_key:
+        headers["x-api-key"] = admin_api_key
+    elif bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+    return headers
+
+
+def _push_account_to_sub2api(email: str, tokens: dict, settings: Dict[str, Any]) -> bool:
+    """上传 OAuth 账号到 Sub2API，优先使用 x-api-key。"""
+    base_url = str(settings.get("base_url") or "").rstrip("/")
+    if not base_url or not tokens.get("refresh_token"):
+        return False
+
+    url = f"{base_url}/api/v1/admin/accounts"
+    payload = _build_sub2api_account_payload(email, tokens, settings.get("group_ids") or [2])
+
+    def _do_request() -> tuple[int, str]:
+        try:
+            resp = requests.post(
+                url,
+                json=payload,
+                headers=_sub2api_auth_headers(settings),
+                timeout=20,
+            )
+            return resp.status_code, resp.text
+        except Exception as e:
+            return 0, str(e)
+
+    status, body = _do_request()
+
+    # 使用 x-api-key 时不需要登录刷新；仅 bearer 模式下 401 再尝试登录一次
+    if status == 401 and not settings.get("admin_api_key") and settings.get("email") and settings.get("password"):
+        new_token = _sub2api_login(settings)
+        if new_token:
+            settings["bearer"] = new_token
+            status, body = _do_request()
+
+    ok = status in (200, 201)
+    if ok:
+        print(f"[Sub2Api] 上传成功 (HTTP {status})")
+    else:
+        print(f"[Sub2Api] 上传失败 (HTTP {status}): {str(body)[:500]}")
+    return ok
 
 
 # ========== 轻量版 CPA 维护实现（内嵌，不依赖项目包） ==========
@@ -975,6 +1150,13 @@ def main():
     parser.add_argument("--sleep-min", type=int, default=5, help="最小间隔(秒)")
     parser.add_argument("--sleep-max", type=int, default=30, help="最大间隔(秒)")
 
+    parser.add_argument("--sub2api-base-url", default=os.getenv("SUB2API_BASE_URL"), help="Sub2API 基础地址")
+    parser.add_argument("--sub2api-admin-api-key", default=os.getenv("SUB2API_ADMIN_API_KEY"), help="Sub2API 管理端全局 API Key（优先使用）")
+    parser.add_argument("--sub2api-bearer", default=os.getenv("SUB2API_BEARER"), help="Sub2API Bearer token（兼容旧方式）")
+    parser.add_argument("--sub2api-email", default=os.getenv("SUB2API_EMAIL"), help="Sub2API 管理员邮箱（旧登录方式）")
+    parser.add_argument("--sub2api-password", default=os.getenv("SUB2API_PASSWORD"), help="Sub2API 管理员密码（旧登录方式）")
+    parser.add_argument("--sub2api-group-ids", default=os.getenv("SUB2API_GROUP_IDS", "2"), help="Sub2API 绑定分组，逗号分隔")
+    parser.add_argument("--sub2api-upload", action="store_true", help="注册成功后自动上传到 Sub2API")
     parser.add_argument("--cpa-base-url", default=os.getenv("CPA_BASE_URL"), help="CPA 基础地址")
     parser.add_argument("--cpa-token", default=os.getenv("CPA_TOKEN"), help="CPA 管理 token (Bearer)")
     parser.add_argument("--cpa-workers", type=int, default=20, help="CPA 清理并发")
@@ -990,6 +1172,7 @@ def main():
     tokens_dir = OUT_DIR / "tokens"
     tokens_dir.mkdir(parents=True, exist_ok=True)
 
+    sub2api_settings = _resolve_sub2api_settings(args)
     pm = _build_cpa_maintainer(args)
 
     count = 0
@@ -1025,12 +1208,22 @@ def main():
             token_file.write_text(token_json, encoding="utf-8")
             print(f"[*] Token 文件已保存: {token_file.name}")
 
-            # 3. 上传 CPA（可选）
+            try:
+                tokens = json.loads(token_json)
+            except Exception as e:
+                print(f"[本地] 解析 token_json 失败: {e}")
+                tokens = None
+
+            # 3. 自动上传 Sub2API（可选）
+            if tokens and sub2api_settings.get("auto_upload") and sub2api_settings.get("base_url") and tokens.get("refresh_token"):
+                _push_account_to_sub2api(email, tokens, sub2api_settings)
+
+            # 4. 上传 CPA（可选）
             upload_ok = False
             if args.cpa_upload:
                 upload_ok = _upload_token_to_cpa(pm, token_json, email, proxy=args.proxy or "")
 
-            # 4. 上传成功后按需删除本地文件/账号行
+            # 5. 上传成功后按需删除本地文件/账号行
             if upload_ok and args.cpa_prune_local:
                 try:
                     if token_file.exists():
@@ -1040,7 +1233,7 @@ def main():
                     print(f"[本地清理] 删除 token 文件失败: {e}")
                 _remove_account_entry(tokens_dir / "accounts.txt", email, real_pwd)
 
-            # 5. 注册后再清理一次（可选）
+            # 6. 注册后再清理一次（可选）
             if pm and args.cpa_clean:
                 _clean_invalid_in_cpa(pm, args)
         else:

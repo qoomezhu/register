@@ -4,15 +4,13 @@ Exa 自动注册脚本，走邮箱验证码，登录 dashboard 抓取完整 API 
 
 ## 环境要求
 - Python 3.10+
+- 已安装 `uv`
 - Chrome/Chromium 可用（Camoufox/patchright 依赖）
-- `pip install -r requirements.txt`
 
 ## 安装
 ```bash
 cd exa-register
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+uv sync
 ```
 
 ## 配置（.env 或环境变量）
@@ -31,8 +29,7 @@ pip install -r requirements.txt
 直接跑主入口，自动生成邮箱与密码并注册：
 ```bash
 cd exa-register
-source venv/bin/activate
-python3 exa_core.py
+uv run python exa_core.py
 ```
 
 ## 输出

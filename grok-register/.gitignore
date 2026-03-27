@@ -1,5 +1,7 @@
 .alma-snapshots
 .env
-__pycache__
-keys/*
+__pycache__/
 *.pyc
+.venv/
+venv/
+keys/*

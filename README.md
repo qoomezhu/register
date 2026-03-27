@@ -2,9 +2,28 @@
 
 项目汇总：
 
-- `openai-register/`：OpenAI 自动注册脚本（详见目录内 README）
-- `grok-register/`：Grok (x.ai) 注册机（详见目录内 README）
-- `tavily-register/`：Tavily 自动注册脚本（目前不可用，详见下方说明）
+- `openai-register/`：OpenAI 自动注册脚本（已统一为 `uv` 管理，详见目录内 README）
+- `grok-register/`：Grok (x.ai) 注册机（已统一为 `uv` 管理，详见目录内 README）
+- `exa-register/`：Exa 自动注册脚本（已统一为 `uv` 管理，详见目录内 README）
+- `qwen-register/`：Qwen 自动注册脚本（已使用 `uv` 管理，详见目录内 README）
+- `tavily-register/`：Tavily 自动注册脚本（已使用 `uv` 管理，目前不可用，详见目录内 README）
+
+## 统一使用方式
+
+现在各子项目都建议使用 `uv` 管理依赖与运行：
+
+```bash
+cd <项目目录>
+uv sync
+uv run python <脚本名>.py
+```
+
+其中 `openai-register/` 的 CPA 清理相关功能需要额外可选依赖：
+
+```bash
+cd openai-register
+uv sync --extra cpa
+```
 
 ### 📢 关注我的频道
 

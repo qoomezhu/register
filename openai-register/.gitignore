@@ -1,4 +1,14 @@
-.alma-snapshots
-.env
-__pycache__
-*.pyc
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+venv/
+
+# Runtime outputs
+exa_apikeys.txt
