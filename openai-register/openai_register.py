@@ -40,7 +40,7 @@ SUB2API_BEARER = str(os.getenv("SUB2API_BEARER") or "").strip()
 SUB2API_EMAIL = str(os.getenv("SUB2API_EMAIL") or "").strip()
 SUB2API_PASSWORD = str(os.getenv("SUB2API_PASSWORD") or "").strip()
 
-LUCKMAIL_BASE_URL = str(os.getenv("LUCKMAIL_BASE_URL") or "").strip().rstrip("/")
+LUCKMAIL_BASE_URL = str(os.getenv("LUCKMAIL_BASE_URL") or "https://mails.luckyous.com").strip().rstrip("/")
 LUCKMAIL_API_KEY = str(os.getenv("LUCKMAIL_API_KEY") or "").strip()
 LUCKMAIL_API_SECRET = str(os.getenv("LUCKMAIL_API_SECRET") or "").strip()
 LUCKMAIL_USE_HMAC = str(os.getenv("LUCKMAIL_USE_HMAC") or "").strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -147,7 +147,7 @@ class LuckMailInbox:
         poll_interval: float = 6.0,
     ):
         if LuckMailClient is None:
-            raise RuntimeError("LuckMail SDK 不可用，请确认仓库中存在 LuckMailSdk-Python 或已安装 luckmail-sdk")
+            raise RuntimeError("LuckMail SDK 不可用，请确认内置 luckmail 包可导入")
         if not base_url:
             raise RuntimeError("缺少 LUCKMAIL_BASE_URL")
         if not api_key:
@@ -164,35 +164,153 @@ class LuckMailInbox:
             use_hmac=bool(use_hmac),
             timeout=30.0,
         )
-        self.order = None
+        self.purchase = None
         self.address = ""
+        self.token = ""
+        self._seen_message_ids: set[str] = set()
 
     def create_outlook_inbox(self) -> str:
         try:
-            self.order = self.client.user.create_order(
+            result = self.client.user.purchase_emails(
                 project_code=self.project_code,
+                quantity=1,
                 email_type=self.email_type,
                 domain=self.domain,
             )
         except LuckMailError as e:
-            raise RuntimeError(f"LuckMail 创单失败: {e}") from e
+            raise RuntimeError(f"LuckMail 购买邮箱失败: {e}") from e
         except Exception as e:
             raise RuntimeError(f"LuckMail 初始化失败: {e}") from e
-        self.address = str(getattr(self.order, "email_address", "") or "").strip()
-        if not self.address:
-            raise RuntimeError("LuckMail 未返回邮箱地址")
-        print(f"[+] 生成邮箱: {self.address} (LuckMail)")
-        print(f"[*] LuckMail 订单号: {getattr(self.order, 'order_no', '')}")
-        print("[*] 自动轮询已启动（LuckMail 订单已创建）")
+
+        purchases = list((result or {}).get("purchases") or [])
+        if not purchases:
+            raise RuntimeError("LuckMail 购买邮箱失败：未返回 purchases")
+
+        self.purchase = purchases[0]
+        self.address = str(self.purchase.get("email_address") or "").strip()
+        self.token = str(self.purchase.get("token") or "").strip()
+        if not self.address or not self.token:
+            raise RuntimeError("LuckMail 购买邮箱失败：缺少 email_address 或 token")
+
+        print(f"[+] 购买邮箱: {self.address} (LuckMail)")
+        print("[*] 自动轮询已启动（LuckMail 已购邮箱 token 已保存）")
         return self.address
 
     def _poll_once(self):
-        if not self.order or not getattr(self.order, "order_no", ""):
-            raise RuntimeError("LuckMail 订单未初始化")
+        if not self.token:
+            raise RuntimeError("LuckMail token 未初始化")
         try:
-            return self.client.user.get_order_code(self.order.order_no)
+            return self.client.user.get_token_code(self.token)
         except LuckMailError as e:
             raise RuntimeError(f"LuckMail 查询验证码失败: {e}") from e
+
+    def _extract_codes_from_token_result(self, result: Any) -> List[str]:
+        body = " ".join([
+            str(getattr(result, "verification_code", "") or ""),
+            json.dumps(getattr(result, "mail", None) or {}, ensure_ascii=False),
+        ])
+        return re.findall(r"(?<!\\d)(\\d{6})(?!\\d)", body)
+
+    def _list_token_mails(self):
+        if not self.token:
+            raise RuntimeError("LuckMail token 未初始化")
+        try:
+            return self.client.user.get_token_mails(self.token)
+        except LuckMailError as e:
+            raise RuntimeError(f"LuckMail 获取邮件列表失败: {e}") from e
+
+    def _get_token_mail_detail(self, message_id: str):
+        if not self.token:
+            raise RuntimeError("LuckMail token 未初始化")
+        try:
+            return self.client.user.get_token_mail_detail(self.token, message_id)
+        except LuckMailError as e:
+            raise RuntimeError(f"LuckMail 获取邮件详情失败: {e}") from e
+
+    def _extract_all_codes(self) -> List[str]:
+        results: List[str] = []
+        try:
+            token_result = self._poll_once()
+            results.extend(self._extract_codes_from_token_result(token_result))
+        except Exception:
+            pass
+        try:
+            mail_list = self._list_token_mails()
+            for mail in list(getattr(mail_list, "mails", []) or []):
+                message_id = str(getattr(mail, "message_id", "") or "").strip()
+                body = " ".join([
+                    str(getattr(mail, "subject", "") or ""),
+                    str(getattr(mail, "body", "") or ""),
+                    str(getattr(mail, "html_body", "") or ""),
+                ])
+                results.extend(re.findall(r"(?<!\\d)(\\d{6})(?!\\d)", body))
+                if message_id:
+                    try:
+                        detail = self._get_token_mail_detail(message_id)
+                        body2 = " ".join([
+                            str(getattr(detail, "subject", "") or ""),
+                            str(getattr(detail, "body_text", "") or ""),
+                            str(getattr(detail, "body_html", "") or ""),
+                            str(getattr(detail, "verification_code", "") or ""),
+                        ])
+                        results.extend(re.findall(r"(?<!\\d)(\\d{6})(?!\\d)", body2))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return results
+
+    def fetch_code(self, timeout_sec: int = 180, poll: float = 6.0, exclude_codes: Optional[List[str]] = None) -> str | None:
+        exclude = set(exclude_codes or [])
+        timeout_sec = max(30, int(timeout_sec or self.timeout))
+        poll = max(1.0, float(poll or self.poll_interval))
+        start = time.monotonic()
+        attempt = 0
+        while time.monotonic() - start < timeout_sec:
+            attempt += 1
+            try:
+                token_result = self._poll_once()
+                has_new_mail = bool(getattr(token_result, "has_new_mail", False))
+                codes = self._extract_codes_from_token_result(token_result)
+                print(f"[otp][luckmail] 轮询 #{attempt}, has_new_mail={has_new_mail}, 目标: {self.address}")
+                for code in codes:
+                    if code and code not in exclude:
+                        return code
+
+                mail_list = self._list_token_mails()
+                mails = list(getattr(mail_list, "mails", []) or [])
+                print(f"[otp][luckmail] 邮件列表数量: {len(mails)}")
+                for mail in mails:
+                    message_id = str(getattr(mail, "message_id", "") or "").strip()
+                    body = " ".join([
+                        str(getattr(mail, "subject", "") or ""),
+                        str(getattr(mail, "body", "") or ""),
+                        str(getattr(mail, "html_body", "") or ""),
+                    ])
+                    for code in re.findall(r"(?<!\\d)(\\d{6})(?!\\d)", body):
+                        if code and code not in exclude:
+                            if message_id:
+                                self._seen_message_ids.add(message_id)
+                            return code
+                    if message_id:
+                        try:
+                            detail = self._get_token_mail_detail(message_id)
+                            body2 = " ".join([
+                                str(getattr(detail, "subject", "") or ""),
+                                str(getattr(detail, "body_text", "") or ""),
+                                str(getattr(detail, "body_html", "") or ""),
+                                str(getattr(detail, "verification_code", "") or ""),
+                            ])
+                            for code in re.findall(r"(?<!\\d)(\\d{6})(?!\\d)", body2):
+                                if code and code not in exclude:
+                                    self._seen_message_ids.add(message_id)
+                                    return code
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[otp][luckmail] 轮询异常: {e}")
+            time.sleep(poll)
+        return None
 
 
 def get_email_and_code_fetcher(
@@ -315,49 +433,10 @@ def get_email_and_code_fetcher(
         generated_password = _gen_password()
 
         def _extract_all_codes() -> List[str]:
-            try:
-                result = inbox._poll_once()
-                body = " ".join([
-                    str(getattr(result, "verification_code", "") or ""),
-                    str(getattr(result, "mail_subject", "") or ""),
-                    str(getattr(result, "mail_from", "") or ""),
-                    str(getattr(result, "mail_body_html", "") or ""),
-                ])
-                return re.findall(r"(?<!\\d)(\\d{6})(?!\\d)", body)
-            except Exception:
-                return []
+            return inbox._extract_all_codes()
 
         def fetch_code(timeout_sec: int = 180, poll: float = 6.0, exclude_codes: Optional[List[str]] = None) -> str | None:
-            exclude = set(exclude_codes or [])
-            timeout_sec = max(30, int(timeout_sec or inbox.timeout))
-            poll = max(1.0, float(poll or inbox.poll_interval))
-            start = time.monotonic()
-            attempt = 0
-            while time.monotonic() - start < timeout_sec:
-                attempt += 1
-                try:
-                    result = inbox._poll_once()
-                    status = str(getattr(result, "status", "") or "pending")
-                    print(f"[otp][luckmail] 轮询 #{attempt}, 状态: {status}, 目标: {email}")
-                    codes = []
-                    verification_code = str(getattr(result, "verification_code", "") or "").strip()
-                    if verification_code:
-                        codes.append(verification_code)
-                    body = " ".join([
-                        str(getattr(result, "mail_subject", "") or ""),
-                        str(getattr(result, "mail_from", "") or ""),
-                        str(getattr(result, "mail_body_html", "") or ""),
-                    ])
-                    codes.extend(re.findall(r"(?<!\\d)(\\d{6})(?!\\d)", body))
-                    for code in codes:
-                        if code and code not in exclude:
-                            return code
-                    if status in {"timeout", "cancelled"}:
-                        return None
-                except Exception as e:
-                    print(f"[otp][luckmail] 轮询异常: {e}")
-                time.sleep(poll)
-            return None
+            return inbox.fetch_code(timeout_sec=timeout_sec, poll=poll, exclude_codes=exclude_codes)
 
         return email, generated_password, fetch_code, _extract_all_codes, "luckmail"
 

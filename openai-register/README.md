@@ -128,7 +128,7 @@ uv run python openai_register.py \
 ## 参数说明
 - `--proxy`：可选，HTTP/S 代理地址。
 - `--mail-provider`：邮箱提供商，可选 `auto` / `luckmail` / `gptmail` / `tempmail`，默认 `auto`。`auto` 会优先尝试 LuckMail，再回退到 TempMail.lol 和 GPTMail。
-- `--luckmail-base-url` / `--luckmail-api-key`：启用 LuckMail 必填；也支持同名环境变量 `LUCKMAIL_BASE_URL` / `LUCKMAIL_API_KEY`。
+- `--luckmail-base-url` / `--luckmail-api-key`：启用 LuckMail 必填；也支持同名环境变量 `LUCKMAIL_BASE_URL` / `LUCKMAIL_API_KEY`。其中 base URL 默认内置为 `https://mails.luckyous.com`。
 - `--luckmail-api-secret` / `--luckmail-use-hmac`：LuckMail 可选 HMAC 鉴权配置。
 - `--luckmail-project-code` / `--luckmail-email-type` / `--luckmail-domain`：LuckMail 创单参数，默认分别是 `openai` / `ms_graph` / `outlook.com`。
 - `--luckmail-order-timeout` / `--luckmail-poll-interval`：LuckMail 轮询超时与轮询间隔。
@@ -160,7 +160,4 @@ uv run python openai_register.py \
 ## 注意
 - 需能访问 `https://auth.openai.com`；代理地区尽量避开 CN/HK。
 - 若某个临时邮箱提供商不稳定，可切换 `--mail-provider gptmail` 或 `--mail-provider tempmail` 单独测试。
-- 如果使用 `--mail-provider auto`，会优先尝试 `TempMail.lol`，失败后自动回退到 `GPTMail`。
-.openai.com`；代理地区尽量避开 CN/HK。
-- 若某个临时邮箱提供商不稳定，可切换 `--mail-provider gptmail` 或 `--mail-provider tempmail` 单独测试。
-- 如果使用 `--mail-provider auto`，会优先尝试 `TempMail.lol`，失败后自动回退到 `GPTMail`。
+- 如果使用 `--mail-provider auto`，会优先尝试 `LuckMail`，失败后自动回退到 `TempMail.lol`，最后回退到 `GPTMail`。
